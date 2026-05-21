@@ -2,105 +2,199 @@
 
 人人都是产品经理(woshipm.com) 全栈运营技能。
 
-## 功能
+---
 
-### 模块一：评论区获客 v1.0
-
-全自动管道：
+## 架构总览
 
 ```
-产品链接 → LLM生成关键词(8个) → 搜索文章(tab=0)+问答(tab=2)
-→ 四维评分筛选(各Top N) → 拉取全文 → LLM生成评论/回答 → 自动发表
+                          woshipm-publisher
+                               │
+          ┌────────────────────┼────────────────────┐
+          ▼                    ▼                    ▼
+   ┌──────────────┐   ┌──────────────┐   ┌──────────────┐
+   │ 评论区获客    │   │  独立搜索     │   │  文章发布     │
+   │ v1.0 ✅      │   │  v1.0 ✅     │   │  🚧 待开发    │
+   └──────────────┘   └──────────────┘   └──────────────┘
 ```
 
-#### 搜索
+---
 
-- **文章 (tab=0)**: 搜索 + 时间排序 + 取前5页
-- **问答 (tab=2)**: 搜索 + 时间排序 + 取前5页
-- 接口: `POST https://api.woshipm.com/search/result.html`
+## 模块一：评论区获客 v1.0
 
-#### 内容获取
+### 流程设计
 
-- 页面: `https://www.woshipm.com/active/{id}.html`
-- 网站有 Cloudflare 保护，使用 cloudscraper 穿透
-- 提取文章正文用于 LLM 生成评论
+```
+                    输入：产品 URL
+                         │
+              ┌──────────▼──────────┐
+              │  抓取产品页面信息     │
+              │  (meta description) │
+              └──────────┬──────────┘
+                         │
+              ┌──────────▼──────────┐
+              │  LLM 生成 8 个关键词  │
+              │  (宽泛 3 + 精准 5)    │
+              └──────────┬──────────┘
+                         │
+         ┌───────────────┼───────────────┐
+         ▼                               ▼
+  ┌──────────────┐               ┌──────────────┐
+  │ 搜索文章 tab=0│               │ 搜索问答 tab=2│
+  │ 时间排序 ×5页 │               │ 时间排序 ×5页 │
+  └──────┬───────┘               └──────┬───────┘
+         │                               │
+         └───────────────┬───────────────┘
+                         │
+              ┌──────────▼──────────┐
+              │    按 ID 去重        │
+              └──────────┬──────────┘
+                         │
+              ┌──────────▼──────────┐
+              │  四维评分 + 60天过滤  │
+              │  文章 Top10 问答Top10 │
+              └──────────┬──────────┘
+                         │
+         ┌───────────────┼───────────────┐
+         ▼                               ▼
+  ┌──────────────┐               ┌──────────────┐
+  │  拉取文章全文  │               │  拉取问答详情  │
+  │ cloudscraper │               │ cloudscraper │
+  └──────┬───────┘               └──────┬───────┘
+         │                               │
+  ┌──────▼───────┐               ┌──────▼───────┐
+  │ LLM生成评论   │               │ LLM生成回答   │
+  │(经验分享风格) │               │(专业回答风格) │
+  └──────┬───────┘               └──────┬───────┘
+         │                               │
+  ┌──────▼───────┐               ┌──────▼───────┐
+  │ WordPress    │               │ WordPress    │
+  │ 评论API发表   │               │ 评论API发表   │
+  └──────────────┘               └──────────────┘
+```
 
-#### 评论发表
+### 平台技术要点
 
-- 平台使用 WordPress，评论接口: `POST https://www.woshipm.com/wp-comments-post.php`
-- 字段: `comment`, `comment_post_ID`, `comment_parent`
-- 需要登录 Cookie
+| 环节 | 端点 | 方式 | 说明 |
+|------|------|------|------|
+| 搜索 | `api.woshipm.com/search/result.html` | POST | AJAX API，返回 HTML 片段 |
+| 文章页 | `www.woshipm.com/{分类}/{id}.html` | GET | Cloudflare 保护，cloudscraper 穿透 |
+| 文章内容 | `og:description` meta 标签 | 正则提取 | ~130 字符摘要，足够 LLM 理解 |
+| 评论发表 | `www.woshipm.com/wp-comments-post.php` | POST | WordPress 标准接口 |
+| 产品信息 | 产品网站 meta description | GET | 让 LLM 知道产品是什么 |
 
-#### 四维评分 (长尾优先)
+### 评论生成策略
 
-| 维度 | 权重 | 说明 |
-|------|------|------|
-| 曝光机会 | 40 | 评论越少分越高 |
-| 内容质量 | 30 | 标题/正文越长越有干货 |
-| 时效性 | 20 | 越新分越高 |
-| 互动健康度 | 10 | 阅读多评论少=机会 |
+**三层控制体系**：
 
-#### 透明/价值先行模式
+```
+          ┌─────────────────────────────────┐
+          │        System Prompt             │
+          │  "像在茶水间跟同行聊天"             │
+          │  不要推荐、不要安利                 │
+          └───────────────┬─────────────────┘
+                          │
+          ┌───────────────▼─────────────────┐
+          │        产品信息注入               │
+          │  抓取 meta description →         │
+          │  LLM 知道产品是做什么的            │
+          └───────────────┬─────────────────┘
+                          │
+          ┌───────────────▼─────────────────┐
+          │        评论风格随机               │
+          │  赞同补充 / 提问讨论 /             │
+          │  实战分享 / 案例分析               │
+          └───────────────┬─────────────────┘
+                          │
+          ┌───────────────▼─────────────────┐
+          │        禁止词检查                 │
+          │  推荐、安利、试试、强烈建议...     │
+          └─────────────────────────────────┘
+```
 
-- `transparent_mode=true`: 先提供价值，产品自然提及
-- `transparent_mode=false`: 纯产品讨论，不提产品
+**评论风格的多样性**：
 
-### 模块二：发文功能 🚧
+| 风格 | 占比 | 模板思路 | 链接融入方式 |
+|------|------|----------|-------------|
+| 实战分享 | 25% | 讲团队真实经历，踩过的坑 | "后来换了个XX(链接)" |
+| 提问讨论 | 25% | 对文中观点有疑问，想深入聊 | "我们试过一种方案(链接)" |
+| 赞同补充 | 25% | 共鸣文中观点，补充自己做法 | "我们也是这么做的，当时用XX(链接)" |
+| 案例分析 | 25% | 联想到自己的类似项目经历 | "让我想起之前一个项目，后来上了XX(链接)" |
 
-(待开发)
+### 评分体系
 
-## 安装
+**四维长尾评分**（高分 = 高曝光机会）：
+
+| 维度 | 权重 | 计算方式 | 设计意图 |
+|------|------|----------|----------|
+| 曝光机会 | 40 | `40 - 评论数 × (40/20)` | 0评论=满分，20评论=0分 |
+| 内容质量 | 30 | `标题长度/60 × 30` | 长标题通常有干货 |
+| 作者活跃 | 20 | `20 - 天数 × (20/180)` | 当天=满分，180天=0分 |
+| 互动健康 | 10 | `(阅读量/评论数)/500 × 10` | 有人看没人评=你的机会 |
+
+### 反爬策略
+
+| 维度 | 文章评论 | 问答回答 | 设计思路 |
+|------|----------|----------|----------|
+| 日上限 | 20 | 10 | 每天控制总量 |
+| 小时上限 | 8 | 4 | 分散在一天内 |
+| 评论间隔 | 60-180s | 90-240s | 模拟人类节奏 |
+| 翻页间隔 | 1-3s | — | 搜索不触发频率限制 |
+| 关键词间隔 | 10-20s | — | 切换搜索话题 |
+| 工作时段 | 8:00-23:00 | — | 正常作息时间 |
+
+---
+
+## 模块二：文章发布 🚧
+
+(待开发，占位)
+
+---
+
+## 安装依赖
 
 ```bash
-# 安装依赖
 pip install cloudscraper
-
-# 配置 Cookie
-cp .env woshipm.env
-# 编辑 woshipm.env，填入你的 WOSHIPM_COOKIE
-```
-
-## 使用
-
-```bash
-# 全自动获客（DRY-RUN 测试）
-python3 scripts/woshipm_acquisition.py auto \
-  --product-url "https://your-product.com" --dry-run
-
-# 全自动获客（正式运行）
-python3 scripts/woshipm_acquisition.py auto \
-  --product-url "https://your-product.com" \
-  --max-comments 10 --max-answers 3
-
-# 单独搜索
-python3 scripts/woshipm_acquisition.py search --keyword "产品经理"
-
-# 单独评论
-python3 scripts/woshipm_acquisition.py comment --article-id 6397495
 ```
 
 ## 配置
 
-`woshipm_acquisition_config.json`:
+```bash
+# .env 文件
+WOSHIPM_COOKIE="你的登录Cookie"
+```
 
-- `keywords`: 种子关键词池
-- `filters.search_pages`: 每关键词搜索页数
-- `filters.search_sort_type`: 1=时间排序
-- `search_tabs.article`: 0, `search_tabs.qa`: 2
-- `anti_crawl`: 速率限制
+Cookie 获取方式：登录 woshipm.com → F12 → Application → Cookies → 复制所有值。
+
+## CLI 命令
+
+```bash
+# 全自动获客（测试模式）
+python3 scripts/woshipm_acquisition.py auto \
+  --product-url "https://your-product.com" --dry-run
+
+# 全自动获客（正式）
+python3 scripts/woshipm_acquisition.py auto \
+  --product-url "https://your-product.com" \
+  --max-comments 10 --max-answers 3
+
+# 独立搜索
+python3 scripts/woshipm_search.py --keyword "产品经理" --max-pages 3
+```
 
 ## 文件结构
 
 ```
 woshipm-publisher/
-├── SKILL.md
-├── .env                          # Cookie 配置
-├── woshipm_acquisition_config.json
+├── SKILL.md                         # 技术设计文档
+├── README.md                        # 用户使用指南
+├── _meta.json                       # 技能元数据
+├── .env                             # Cookie + LLM 配置
+├── woshipm_acquisition_config.json  # 获客策略配置
 ├── scripts/
-│   ├── woshipm_acquisition.py    # 获客主脚本
-│   └── woshipm_search.py         # 独立搜索工具
+│   ├── woshipm_acquisition.py       # 获客主脚本 (1100+ 行)
+│   └── woshipm_search.py            # 独立搜索工具
 ├── data/
-│   ├── commented-history.json    # 评论去重记录
-│   └── answered-history.json     # 回答去重记录
-└── templates/                    # 发布模板(待)
+│   ├── commented-history.json       # 评论去重
+│   └── answered-history.json        # 回答去重
+└── templates/                       # 发布模板 (待)
 ```

@@ -492,8 +492,55 @@ def score_and_filter(articles: List[dict], config: dict) -> List[dict]:
 
 
 # ═══════════════════════════════════════════════════════════
-#  关键词生成
+#  产品信息抓取（让 LLM 知道产品是什么）
 # ═══════════════════════════════════════════════════════════
+
+def fetch_product_info(product_url: str) -> str:
+    """抓取产品页面的 meta description，让 LLM 了解产品"""
+    if not product_url:
+        return ""
+
+    try:
+        req = urllib.request.Request(
+            product_url,
+            headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"}
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            html = resp.read().decode("utf-8", errors="replace")
+
+        # 尝试多种方式获取描述
+        desc = ""
+        for pattern in [
+            r'<meta\s+name="description"[^>]+content="([^"]+)"',
+            r'<meta\s+property="og:description"\s+content="([^"]+)"',
+            r'<meta\s+content="([^"]+)"[^>]+name="description"',
+            r'<meta\s+name="Description"\s+content="([^"]+)"',
+        ]:
+            m = re.search(pattern, html, re.IGNORECASE)
+            if m:
+                desc = html_mod.unescape(m.group(1)).strip()
+                if len(desc) > 20:
+                    break
+
+        # 也提取标题
+        title = ""
+        t = re.search(r'<title>(.*?)</title>', html)
+        if t:
+            title = html_mod.unescape(t.group(1)).strip()
+
+        info_parts = []
+        if title:
+            info_parts.append(f"产品名称：{title}")
+        if desc:
+            info_parts.append(f"产品描述：{desc}")
+
+        result = "\n".join(info_parts) if info_parts else product_url
+        logger.info(f"✓ 获取产品信息: {title or product_url}")
+        return result
+
+    except Exception as e:
+        logger.warning(f"获取产品信息失败: {e}，使用 URL 兜底")
+        return f"产品链接：{product_url}"
 
 def generate_keywords(product_url: str = "", seed_keywords: list = None) -> list:
     """LLM 生成搜索关键词"""
@@ -529,28 +576,28 @@ def generate_keywords(product_url: str = "", seed_keywords: list = None) -> list
 #  评论/回答生成
 # ═══════════════════════════════════════════════════════════
 
-def generate_comment(article: dict, product_url: str = "", cookie: str = "",
-                     transparent: bool = True) -> str:
-    """LLM生成评论（基于文章全文）"""
+def generate_comment(article: dict, product_url: str = "", product_info: str = "",
+                     cookie: str = "", transparent: bool = True) -> str:
+    """LLM生成评论（基于文章全文 + 产品信息）"""
     if call_llm is None:
         return generate_fallback_comment(article)
 
     try:
-        # 拉取全文
+        # 拉取文章全文
         full_content = ""
         if cookie:
             full_content = fetch_article_content(article["article_id"], cookie)
-
         body = full_content[:2500] if full_content else article.get("title", "")
 
         if transparent:
             system_prompt = (
-                "你是一位产品经理，在人人都是产品经理社区认真读了一篇文章后留下评论。\n"
-                "原则：\n"
-                "1. 先提供价值——基于文章具体内容补充产品观点或实践经验\n"
-                "2. 必须引用文中至少1个具体观点\n"
-                "3. 如果产品与文章自然相关，可轻提一句\n"
-                "4. 口语化、专业、真诚，像同行交流"
+                "你是一位有经验的产品经理，在社区里真诚地分享见解和经验。\n"
+                "写评论时：\n"
+                "1. 像在茶水间跟同行聊天，不是在台上做演讲\n"
+                "2. 重点放在对文章观点的回应和自己的真实经历上\n"
+                "3. 讲经历时顺嘴提到用过的工具和链接，像\"后来换了个XX(链接)\"这样\n"
+                "4. 不要用\"推荐\"、\"安利\"、\"强烈建议\"这类词\n"
+                "5. 链接是经历的注脚，不是评论的落脚点"
             )
         else:
             system_prompt = (
@@ -562,32 +609,34 @@ def generate_comment(article: dict, product_url: str = "", cookie: str = "",
 
         comment_type = random.choice(["赞同补充", "提问讨论", "实战分享", "案例分析"])
         style_hints = {
-            "赞同补充": "赞同文中某个观点，补充自己相关的产品实践经验。",
-            "提问讨论": "对文中的产品决策或方法论提出有深度的疑问。",
-            "实战分享": "分享自己在该产品方向的真实实践经验和教训。",
-            "案例分析": "结合文中的案例引申自己的类似经历和思考。",
+            "赞同补充": "对文中某个观点有共鸣，顺着聊自己的经历和踩过的坑，过程中自然提到用过什么工具。",
+            "提问讨论": "对文中的某个点有疑问或想深入讨论，顺便提一句你试过的方案。",
+            "实战分享": "讲讲自己在这个方向的真实经历，遇到了什么问题、怎么解决的，解决过程中用过什么。",
+            "案例分析": "看到文中的案例联想到自己的类似经历，聊聊当时的做法，顺带提用了什么。",
         }
 
         user_prompt = f"""
-你在人人都是产品经理社区读了一篇文章，打算发表评论。
+你看到一篇产品社区的文章，想留一条评论。重点是真诚分享，不是推销产品。
+
+## 你的背景（写到评论里时参考这个，但不要说"我是XXX"）
+你所在的团队在做AI产品开发，平时会用到一些工具。其中一个是 {product_url} ，它的作用是：{product_info}
 
 ## 文章内容
 标题：{article['title']}
 正文（节选）：
 {body}
 
-## 评论风格：{comment_type}
+## 这条评论的风格：{comment_type}
 {style_hints.get(comment_type, '')}
 
 ## 要求
 - 字数：80-200字
-- 必须引用文中至少1个具体观点
-- 口语化但专业，像真实产品经理的讨论"""
+- 必须引用文中至少1个具体观点，这才是评论的重心
+- 聊自己真实的经历或想法，像给朋友讲自己踩过的坑
+- 讲经历过程中尽量自然地提到链接 {product_url}，比如"后来换了个聚合网关(链接)统一成OpenAI接口"这种写法
+- 千万不要写成"我推荐XX"、"大家可以试试XX"、"强烈安利"这类推销话术
 
-        if transparent and product_url:
-            user_prompt += f"\n- 若内容自然相关可轻提：{product_url}，不相关则不提"
-
-        user_prompt += "\n\n直接返回评论文本。"
+直接返回评论文本。"""
 
         comment = call_llm(
             system_prompt=system_prompt, user_prompt=user_prompt,
@@ -605,8 +654,8 @@ def generate_comment(article: dict, product_url: str = "", cookie: str = "",
         return generate_fallback_comment(article)
 
 
-def generate_answer(article: dict, product_url: str = "", cookie: str = "",
-                    transparent: bool = True) -> str:
+def generate_answer(article: dict, product_url: str = "", product_info: str = "",
+                    cookie: str = "", transparent: bool = True) -> str:
     """LLM生成问答回答"""
     if call_llm is None:
         return generate_fallback_comment(article)
@@ -682,10 +731,12 @@ class Commenter:
     """评论/回答发表器"""
 
     def __init__(self, cookie: str, config: dict, product_url: str = "",
-                 history_file: str = COMMENTED_FILE, label: str = "评论"):
+                 product_info: str = "", history_file: str = COMMENTED_FILE,
+                 label: str = "评论"):
         self.cookie = cookie
         self.config = config
         self.product_url = product_url
+        self.product_info = product_info
         self.transparent = config.get("transparent_mode", True)
         self.label = label
         self.history_file = history_file
@@ -763,9 +814,11 @@ class Commenter:
 
         # LLM 生成
         if self.label == "评论":
-            text = generate_comment(article, self.product_url, self.cookie, self.transparent)
+            text = generate_comment(article, self.product_url, self.product_info,
+                                    self.cookie, self.transparent)
         else:
-            text = generate_answer(article, self.product_url, self.cookie, self.transparent)
+            text = generate_answer(article, self.product_url, self.product_info,
+                                   self.cookie, self.transparent)
 
         # 发表
         logger.info(f"⎿ 发表{self.label}: {article['title'][:40]}...")
@@ -799,10 +852,12 @@ class AutoAcquisition:
         self.cookie = cookie
         self.config = config
         self.product_url = product_url
+        # 先抓取产品信息，让 LLM 知道产品是什么
+        self.product_info = fetch_product_info(product_url) if product_url else ""
         self.article_commenter = Commenter(
-            cookie, config, product_url, COMMENTED_FILE, "评论")
+            cookie, config, product_url, self.product_info, COMMENTED_FILE, "评论")
         self.qa_answerer = Commenter(
-            cookie, config, product_url, ANSWERED_FILE, "回答")
+            cookie, config, product_url, self.product_info, ANSWERED_FILE, "回答")
 
     def run(self, max_comments: int = 5, max_answers: int = 2,
             dry_run: bool = False):
