@@ -1,0 +1,13 @@
+{
+  "name": "woshipm-publisher",
+  "version": "1.0.0",
+  "description": "人人都是产品经理(woshipm)全栈运营：评论区获客(AI评论+问答回答) + 文章发布",
+  "author": "AI智能团队",
+  "scripts": {
+    "acquisition": "python3 scripts/woshipm_acquisition.py auto",
+    "search": "python3 scripts/woshipm_search.py"
+  },
+  "dependencies": {
+    "python": ["cloudscraper", "requests", "re", "json", "logging"]
+  }
+}

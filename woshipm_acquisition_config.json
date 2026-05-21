@@ -1,0 +1,54 @@
+{
+  "$schema": "woshipm获客配置 v1.0",
+  "$description": "AI驱动人人都是产品经理评论区获客",
+
+  "keywords": [
+    "产品经理",
+    "需求分析",
+    "AI产品",
+    "Axure",
+    "PRD",
+    "用户研究"
+  ],
+
+  "scoring": {
+    "$comment": "四维评分：优先找评论少、质量高、时效新的长尾文章",
+    "exposure_weight": 40,
+    "quality_weight": 30,
+    "activity_weight": 20,
+    "health_weight": 10
+  },
+
+  "filters": {
+    "min_view_count": 0,
+    "min_comment_count": 0,
+    "max_days_old": 60,
+    "top_n": 10,
+    "search_pages": 5,
+    "search_sort_type": 1
+  },
+
+  "transparent_mode": true,
+
+  "anti_crawl": {
+    "work_hours": { "start": 8, "end": 23 },
+    "daily": { "max_comments": 20, "max_answers": 10 },
+    "hourly": { "max_comments": 8, "max_answers": 4 },
+    "delays": {
+      "between_comments": { "min": 60, "max": 180 },
+      "between_answers": { "min": 90, "max": 240 },
+      "between_searches": { "min": 3, "max": 8 },
+      "between_keywords": { "min": 10, "max": 20 },
+      "between_pages": { "min": 1, "max": 3 }
+    },
+    "retry": { "max_attempts": 3, "base_delay": 20 }
+  },
+
+  "search_tabs": {
+    "article": 0,
+    "qa": 2
+  },
+
+  "comment_templates": [],
+  "answer_templates": []
+}
