@@ -16,6 +16,7 @@ import urllib.request
 import urllib.error
 import urllib.parse
 import time
+import random
 import logging
 from datetime import datetime
 from pathlib import Path
@@ -37,14 +38,27 @@ logger = logging.getLogger(__name__)
 # ─── 常量 ─────────────────────────────────────────────────
 SEARCH_URL = "https://api.woshipm.com/search/result.html"
 ARTICLE_URL_TEMPLATE = "https://www.woshipm.com/active/{article_id}.html"
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                  "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+HEADERS_BASE = {
     "Content-Type": "application/x-www-form-urlencoded",
     "Referer": "https://api.woshipm.com/search/list.html",
     "Origin": "https://api.woshipm.com",
     "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
 }
+
+# UA 轮换池
+_UA_POOL = [
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15",
+]
+
+def _get_headers() -> dict:
+    """获取搜索请求头（UA 随机轮换）"""
+    headers = dict(HEADERS_BASE)
+    headers["User-Agent"] = random.choice(_UA_POOL)
+    return headers
 
 
 def search_page(keyword: str, page: int = 1, tab: int = 0,
@@ -64,7 +78,7 @@ def search_page(keyword: str, page: int = 1, tab: int = 0,
         total_count: 总文章数
     """
     data = f"key={urllib.parse.quote(keyword)}&tab={tab}&page={page}&idSearch=&sortType={sort_type}"
-    req = urllib.request.Request(SEARCH_URL, data=data.encode("utf-8"), headers=HEADERS)
+    req = urllib.request.Request(SEARCH_URL, data=data.encode("utf-8"), headers=_get_headers())
 
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:

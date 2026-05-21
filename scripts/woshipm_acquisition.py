@@ -77,11 +77,25 @@ SEARCH_URL = "https://api.woshipm.com/search/result.html"
 ARTICLE_URL_TPL = "https://www.woshipm.com/active/{article_id}.html"
 COMMENT_URL = "https://www.woshipm.com/wp-comments-post.php"
 
-HEADERS_SEARCH = {
-    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+HEADERS_SEARCH_BASE = {
     "Content-Type": "application/x-www-form-urlencoded",
     "Referer": "https://api.woshipm.com/search/list.html",
 }
+
+# UA 轮换池 — 模拟不同浏览器/系统
+_SEARCH_UA_POOL = [
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15",
+]
+
+def _get_search_headers() -> dict:
+    """获取搜索请求头（UA 随机轮换）"""
+    headers = dict(HEADERS_SEARCH_BASE)
+    headers["User-Agent"] = random.choice(_SEARCH_UA_POOL)
+    return headers
 
 # ─── 日志配置 ─────────────────────────────────────────────
 logging.basicConfig(
@@ -193,7 +207,12 @@ def save_history(path: str, records: list):
 # ═══════════════════════════════════════════════════════════
 
 def get_scraper(cookie: str = "") -> cloudscraper.CloudScraper:
-    """获取新的 cloudscraper 会话"""
+    """
+    获取 cloudscraper 会话（复用 session，不清空 cookie）
+    
+    Referer 链: 搜索结果页 → 文章详情页 → 评论提交页
+    session 复用可保留浏览器指纹一致性，降低风控识别。
+    """
     if not HAS_CLOUDSCRAPER:
         return None
     scraper = cloudscraper.create_scraper(
@@ -203,10 +222,16 @@ def get_scraper(cookie: str = "") -> cloudscraper.CloudScraper:
     scraper.headers.update({
         "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Referer": "https://www.baidu.com/",
+        "Referer": "https://api.woshipm.com/search/list.html",
         "Cache-Control": "no-cache",
     })
-    scraper.cookies.clear()
+    # 注入登录 Cookie（不复用则无法访问文章/发表评论）
+    if cookie and "=" in cookie:
+        for item in cookie.split(";"):
+            item = item.strip()
+            if "=" in item:
+                k, v = item.split("=", 1)
+                scraper.cookies.set(k.strip(), v.strip())
     return scraper
 
 
@@ -229,7 +254,7 @@ def search_page(keyword: str, page: int = 1, tab: int = 0,
         (articles, total_count)
     """
     data = f"key={urllib.parse.quote(keyword)}&tab={tab}&page={page}&idSearch=&sortType={sort_type}"
-    req = urllib.request.Request(SEARCH_URL, data=data.encode("utf-8"), headers=HEADERS_SEARCH)
+    req = urllib.request.Request(SEARCH_URL, data=data.encode("utf-8"), headers=_get_search_headers())
 
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
@@ -332,18 +357,30 @@ def search_all_pages(keyword: str, tab: int = 0, sort_type: int = 1,
 #  文章内容抓取 (www.woshipm.com, cloudscraper穿透)
 # ═══════════════════════════════════════════════════════════
 
-def fetch_article_content(article_id: str, cookie: str = "") -> str:
-    """抓取文章内容（优先 og:description，兜底全文段落提取）"""
+def fetch_article_content(article_id: str, cookie: str = "", scraper=None) -> str:
+    """
+    抓取文章内容（优先 og:description，兜底全文段落提取）
+    
+    Args:
+        article_id: 文章ID
+        cookie: 登录Cookie
+        scraper: 可复用的 cloudscraper session（不传则创建新会话）
+    """
     if not HAS_CLOUDSCRAPER:
         logger.warning("cloudscraper 不可用，无法拉取文章内容")
         return ""
 
     content = ""
+    _close_scraper = False
     try:
-        scraper = get_scraper(cookie)
+        if scraper is None:
+            scraper = get_scraper(cookie)
+            _close_scraper = True
         if scraper is None:
             return ""
         url = ARTICLE_URL_TPL.format(article_id=article_id)
+        # 动态设置 Referer: 搜索结果页 → 文章详情页
+        scraper.headers.update({"Referer": "https://api.woshipm.com/search/list.html"})
         resp = scraper.get(url, timeout=25, allow_redirects=True)
 
         if resp.status_code != 200:
@@ -750,17 +787,31 @@ class Commenter:
                 return True, "已处理过"
         return False, ""
 
-    def post_with_scraper(self, article_id: str, content: str) -> bool:
-        """通过 cloudscraper 发表评论（WordPress wp-comments-post.php）"""
+    def post_with_scraper(self, article_id: str, content: str, scraper=None) -> bool:
+        """
+        通过 cloudscraper 发表评论（WordPress wp-comments-post.php）
+        
+        Args:
+            article_id: 文章ID
+            content: 评论内容
+            scraper: 可复用的 cloudscraper session（不传则创建新会话）
+        """
         if not HAS_CLOUDSCRAPER:
             logger.error("需要 cloudscraper 才能发表评论")
             return False
 
+        _close_scraper = False
         try:
-            scraper = get_scraper(self.cookie)
+            if scraper is None:
+                scraper = get_scraper(self.cookie)
+                _close_scraper = True
             if scraper is None:
                 logger.error("需要 cloudscraper 才能发表评论")
                 return False
+
+            # 动态设置 Referer: 文章详情页 → 评论提交
+            article_url = ARTICLE_URL_TPL.format(article_id=article_id)
+            scraper.headers.update({"Referer": article_url})
 
             # WordPress 标准评论表单字段
             data = {
@@ -770,7 +821,7 @@ class Commenter:
                 "submit": "发布",
             }
 
-            # 添加 cookie
+            # 注入 Cookie（确保 session 携带登录态）
             if self.cookie and "=" in self.cookie:
                 for item in self.cookie.split(";"):
                     item = item.strip()
@@ -778,8 +829,7 @@ class Commenter:
                         k, v = item.split("=", 1)
                         scraper.cookies.set(k.strip(), v.strip())
 
-            resp = scraper.post(COMMENT_URL, data=data, timeout=20,
-                                headers={"Referer": ARTICLE_URL_TPL.format(article_id=article_id)})
+            resp = scraper.post(COMMENT_URL, data=data, timeout=20)
 
             if resp.status_code in (200, 302):
                 return True
@@ -892,23 +942,33 @@ class AutoAcquisition:
         answers_done = 0
         debug_info = []
 
-        # ── 并行搜索文章 + 问答 ──
-        logger.info("\n📄🔍 并行搜索文章(tab=0) + 问答(tab=2)...")
+        # ── 串行搜索文章 + 问答（带反爬延迟，降低风控识别）──
+        logger.info("\n📄🔍 串行搜索文章(tab=0) + 问答(tab=2)...")
         all_articles = []
-        search_tasks = []
 
-        with ThreadPoolExecutor(max_workers=4) as executor:
-            for kw in keywords:
-                search_tasks.append(
-                    executor.submit(search_all_pages, kw, tabs["article"],
-                                    sort_type, search_pages, delays))
-                search_tasks.append(
-                    executor.submit(search_all_pages, kw, tabs["qa"],
-                                    sort_type, search_pages, delays))
+        for i, kw in enumerate(keywords):
+            # 关键词间延迟（第1个关键词不延迟）
+            if i > 0:
+                wait_random(delays.get("between_keywords", {}).get("min", 10),
+                            delays.get("between_keywords", {}).get("max", 20),
+                            "关键词间隔")
 
-            for future in as_completed(search_tasks):
-                articles = future.result()
-                all_articles.extend(articles)
+            logger.info(f"  搜索关键词 [{i+1}/{len(keywords)}]: {kw}")
+
+            # 搜索文章
+            articles = search_all_pages(kw, tabs["article"],
+                                        sort_type, search_pages, delays)
+            all_articles.extend(articles)
+
+            # 搜索类型间延迟
+            wait_random(delays.get("between_searches", {}).get("min", 3),
+                        delays.get("between_searches", {}).get("max", 8),
+                        "搜索间隔")
+
+            # 搜索问答
+            qa = search_all_pages(kw, tabs["qa"],
+                                  sort_type, search_pages, delays)
+            all_articles.extend(qa)
 
         logger.info(f"✓ 共搜索到 {len(all_articles)} 条内容（去重前）")
 
@@ -958,6 +1018,12 @@ class AutoAcquisition:
                     pre_generated[article["article_id"]] = text
                     logger.info(f"  ✓ {action}: {article['title'][:40]}...")
 
+        # ── 创建共享 scraper session（发表阶段复用，保持浏览器指纹一致性）──
+        shared_scraper = None
+        if not dry_run and HAS_CLOUDSCRAPER and (target_articles or target_qa):
+            shared_scraper = get_scraper(self.cookie)
+            logger.info("📱 创建共享 scraper session（发表阶段复用）")
+
         # ── 顺序发表（带反爬延时）──
         for article in target_articles:
             if comments_done >= max_comments:
@@ -982,7 +1048,7 @@ class AutoAcquisition:
                 debug_info.append({"action": "comment", "title": article["title"], "status": "dry-run"})
             else:
                 logger.info(f"⎿ 发表评论: {article['title'][:40]}...")
-                success = self.article_commenter.post_with_scraper(article["article_id"], text)
+                success = self.article_commenter.post_with_scraper(article["article_id"], text, scraper=shared_scraper)
                 if success:
                     comments_done += 1
                     record = {
@@ -1022,7 +1088,7 @@ class AutoAcquisition:
                 debug_info.append({"action": "answer", "title": qa["title"], "status": "dry-run"})
             else:
                 logger.info(f"⎿ 发表回答: {qa['title'][:40]}...")
-                success = self.qa_answerer.post_with_scraper(qa["article_id"], text)
+                success = self.qa_answerer.post_with_scraper(qa["article_id"], text, scraper=shared_scraper)
                 if success:
                     answers_done += 1
                     record = {
@@ -1042,7 +1108,7 @@ class AutoAcquisition:
         # 汇总
         logger.info("\n" + "=" * 60)
         logger.info("✅ 执行完成")
-        logger.info(f"  搜索关键词: {len(keywords)} 个 (并行)")
+        logger.info(f"  搜索关键词: {len(keywords)} 个 (串行+反爬延迟)")
         logger.info(f"  找到内容:   {len(all_articles)} 条")
         logger.info(f"  评论成功:   {comments_done} 条")
         logger.info(f"  回答成功:   {answers_done} 条")
