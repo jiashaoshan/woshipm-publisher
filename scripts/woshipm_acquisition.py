@@ -156,8 +156,8 @@ def load_acquisition_config() -> dict:
             "daily": {"max_comments": 20, "max_answers": 10},
             "hourly": {"max_comments": 8, "max_answers": 4},
             "delays": {
-                "between_comments": {"min": 60, "max": 180},
-                "between_answers": {"min": 90, "max": 240},
+                "between_comments": {"min": 1, "max": 4},
+                "between_answers": {"min": 1, "max": 4},
                 "between_searches": {"min": 3, "max": 8},
                 "between_keywords": {"min": 10, "max": 20},
                 "between_pages": {"min": 1, "max": 3},
@@ -324,7 +324,7 @@ def search_page(keyword: str, page: int = 1, tab: int = 0,
 
 
 def search_all_pages(keyword: str, tab: int = 0, sort_type: int = 1,
-                     max_pages: int = 5, delays: dict = None) -> List[dict]:
+                     max_pages: int = 5, delays: dict = None, dry_run: bool = False) -> List[dict]:
     """搜索多页并汇总"""
     all_articles = []
     page = 1
@@ -348,7 +348,7 @@ def search_all_pages(keyword: str, tab: int = 0, sort_type: int = 1,
         if delays:
             wait_random(delays.get("between_pages", {}).get("min", 1),
                         delays.get("between_pages", {}).get("max", 3),
-                        "翻页间隔")
+                        "翻页间隔", skip=dry_run)
 
     return all_articles
 
@@ -437,7 +437,10 @@ def is_work_hours(config: dict) -> bool:
     return False
 
 
-def wait_random(min_sec: float = 5, max_sec: float = 15, reason: str = "操作间隔"):
+def wait_random(min_sec: float = 5, max_sec: float = 15, reason: str = "操作间隔", skip: bool = False):
+    if skip:
+        logger.info(f"⏭️ [DRY-RUN] 跳过 {reason}")
+        return
     delay = random.uniform(min_sec, max_sec)
     logger.info(f"⏳ {reason}，等待 {int(delay)}s...")
     time.sleep(delay)
@@ -903,6 +906,7 @@ class AutoAcquisition:
         self.cookie = cookie
         self.config = config
         self.product_url = product_url
+        self.transparent = config.get("transparent_mode", True)
         # 先抓取产品信息，让 LLM 知道产品是什么
         self.product_info = fetch_product_info(product_url) if product_url else ""
         self.article_commenter = Commenter(
@@ -951,23 +955,23 @@ class AutoAcquisition:
             if i > 0:
                 wait_random(delays.get("between_keywords", {}).get("min", 10),
                             delays.get("between_keywords", {}).get("max", 20),
-                            "关键词间隔")
+                            "关键词间隔", skip=dry_run)
 
             logger.info(f"  搜索关键词 [{i+1}/{len(keywords)}]: {kw}")
 
             # 搜索文章
             articles = search_all_pages(kw, tabs["article"],
-                                        sort_type, search_pages, delays)
+                                        sort_type, search_pages, delays, dry_run=dry_run)
             all_articles.extend(articles)
 
             # 搜索类型间延迟
             wait_random(delays.get("between_searches", {}).get("min", 3),
                         delays.get("between_searches", {}).get("max", 8),
-                        "搜索间隔")
+                        "搜索间隔", skip=dry_run)
 
             # 搜索问答
             qa = search_all_pages(kw, tabs["qa"],
-                                  sort_type, search_pages, delays)
+                                  sort_type, search_pages, delays, dry_run=dry_run)
             all_articles.extend(qa)
 
         logger.info(f"✓ 共搜索到 {len(all_articles)} 条内容（去重前）")
@@ -993,7 +997,33 @@ class AutoAcquisition:
         target_articles = top_articles[:max_comments]
         target_qa = top_qa[:max_answers]
 
-        # ── 并行 LLM 生成评论/回答 ──
+        # 去重前置：已评论/回答过的文章直接从目标列表剔除，避免浪费 LLM 调用
+        dup_skipped_articles = 0
+        dup_skipped_qa = 0
+        filtered_articles = []
+        for a in target_articles:
+            is_dup, _ = self.article_commenter._is_processed(a["article_id"])
+            if is_dup:
+                dup_skipped_articles += 1
+                debug_info.append({"action": "comment", "title": a["title"], "status": "skip:dedup(pre)"})
+            else:
+                filtered_articles.append(a)
+        target_articles = filtered_articles
+
+        filtered_qa = []
+        for q in target_qa:
+            is_dup, _ = self.qa_answerer._is_processed(q["article_id"])
+            if is_dup:
+                dup_skipped_qa += 1
+                debug_info.append({"action": "answer", "title": q["title"], "status": "skip:dedup(pre)"})
+            else:
+                filtered_qa.append(q)
+        target_qa = filtered_qa
+
+        if dup_skipped_articles or dup_skipped_qa:
+            logger.info(f"🔁 去重前置: 跳过 {dup_skipped_articles} 条已评论 + {dup_skipped_qa} 条已回答")
+
+        # ── 并行 LLM 生成评论/回答（仅对新文章）──
         pre_generated = {}  # article_id → text
         if target_articles or target_qa:
             logger.info(f"\n🤖 并行生成 {len(target_articles)} 条评论 + {len(target_qa)} 条回答...")
@@ -1062,8 +1092,8 @@ class AutoAcquisition:
                 else:
                     debug_info.append({"action": "comment", "title": article["title"], "status": "post_failed"})
 
-            d = delays.get("between_comments", {"min": 60, "max": 180})
-            wait_random(d["min"], d["max"], "评论间隔")
+            d = delays.get("between_comments", {"min": 1, "max": 4})
+            wait_random(d["min"], d["max"], "评论间隔", skip=dry_run)
 
         # 回答发表
         for qa in target_qa:
@@ -1102,8 +1132,8 @@ class AutoAcquisition:
                 else:
                     debug_info.append({"action": "answer", "title": qa["title"], "status": "post_failed"})
 
-            d = delays.get("between_answers", {"min": 90, "max": 240})
-            wait_random(d["min"], d["max"], "回答间隔")
+            d = delays.get("between_answers", {"min": 1, "max": 4})
+            wait_random(d["min"], d["max"], "回答间隔", skip=dry_run)
 
         # 汇总
         logger.info("\n" + "=" * 60)
