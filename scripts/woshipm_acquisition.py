@@ -28,6 +28,7 @@ import logging
 from datetime import datetime
 from typing import List, Dict, Optional, Any, Tuple
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ─── 尝试导入 cloudscraper ────────────────────────────────
 try:
@@ -861,7 +862,7 @@ class AutoAcquisition:
 
     def run(self, max_comments: int = 5, max_answers: int = 2,
             dry_run: bool = False):
-        """执行全自动获客"""
+        """执行全自动获客（并行搜索 + 并发生成 + 顺序发表）"""
         self.dry_run = dry_run
         self.article_commenter.dry_run = dry_run
         self.qa_answerer.dry_run = dry_run
@@ -889,28 +890,29 @@ class AutoAcquisition:
 
         comments_done = 0
         answers_done = 0
-        all_articles = []
         debug_info = []
 
-        # 搜索文章 (tab=0)
-        logger.info("\n📄 搜索文章 (tab=0)...")
-        for kw in keywords:
-            if comments_done >= max_comments:
-                break
-            articles = search_all_pages(kw, tabs["article"], sort_type, search_pages, delays)
-            all_articles.extend([a for a in articles if a["tab"] == 0])
+        # ── 并行搜索文章 + 问答 ──
+        logger.info("\n📄🔍 并行搜索文章(tab=0) + 问答(tab=2)...")
+        all_articles = []
+        search_tasks = []
 
-        # 搜索问答 (tab=2)
-        logger.info("\n❓ 搜索问答 (tab=2)...")
-        for kw in keywords:
-            if answers_done >= max_answers:
-                break
-            qa_items = search_all_pages(kw, tabs["qa"], sort_type, search_pages, delays)
-            all_articles.extend([a for a in qa_items if a["tab"] == 2])
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            for kw in keywords:
+                search_tasks.append(
+                    executor.submit(search_all_pages, kw, tabs["article"],
+                                    sort_type, search_pages, delays))
+                search_tasks.append(
+                    executor.submit(search_all_pages, kw, tabs["qa"],
+                                    sort_type, search_pages, delays))
+
+            for future in as_completed(search_tasks):
+                articles = future.result()
+                all_articles.extend(articles)
 
         logger.info(f"✓ 共搜索到 {len(all_articles)} 条内容（去重前）")
 
-        # 按 article_id 去重
+        # 去重
         seen_ids = set()
         unique_articles = []
         for a in all_articles:
@@ -921,44 +923,126 @@ class AutoAcquisition:
         all_articles = unique_articles
         logger.info(f"✓ 去重后 {len(all_articles)} 条内容")
 
-        # 分类
+        # 分类 + 评分
         articles_only = [a for a in all_articles if a["tab"] == 0]
         qa_only = [a for a in all_articles if a["tab"] == 2]
-
-        # 评分筛选
         top_articles = score_and_filter(articles_only, self.config)
         top_qa = score_and_filter(qa_only, self.config)
 
-        # 评论文章
-        for article in top_articles:
+        # 截取需要处理的数量
+        target_articles = top_articles[:max_comments]
+        target_qa = top_qa[:max_answers]
+
+        # ── 并行 LLM 生成评论/回答 ──
+        pre_generated = {}  # article_id → text
+        if target_articles or target_qa:
+            logger.info(f"\n🤖 并行生成 {len(target_articles)} 条评论 + {len(target_qa)} 条回答...")
+            gen_futures = {}
+
+            with ThreadPoolExecutor(max_workers=3) as executor:
+                for a in target_articles:
+                    gen_futures[executor.submit(
+                        generate_comment, a, self.product_url, self.product_info,
+                        self.cookie, self.transparent
+                    )] = ("comment", a)
+
+                for q in target_qa:
+                    gen_futures[executor.submit(
+                        generate_answer, q, self.product_url, self.product_info,
+                        self.cookie, self.transparent
+                    )] = ("answer", q)
+
+                for future in as_completed(gen_futures):
+                    action, article = gen_futures[future]
+                    text = future.result()
+                    pre_generated[article["article_id"]] = text
+                    logger.info(f"  ✓ {action}: {article['title'][:40]}...")
+
+        # ── 顺序发表（带反爬延时）──
+        for article in target_articles:
             if comments_done >= max_comments:
                 break
-            ok, msg = self.article_commenter.process(article, article.get("keyword", ""))
-            if ok:
-                comments_done += 1
-                debug_info.append({"action": "comment", "title": article["title"], "status": msg})
-                d = delays.get("between_comments", {"min": 60, "max": 180})
-                wait_random(d["min"], d["max"], "评论间隔")
-            else:
-                debug_info.append({"action": "comment", "title": article["title"], "status": f"fail:{msg}"})
+            # 去重 + 反爬
+            is_dup, reason = self.article_commenter._is_processed(article["article_id"])
+            if is_dup:
+                debug_info.append({"action": "comment", "title": article["title"], "status": f"skip:{reason}"})
+                continue
 
-        # 回答问答
-        for qa in top_qa:
+            ok, msg = check_rate_limits(self.article_commenter.history, "评论",
+                                         anti.get("daily", {}).get("max_comments", 10),
+                                         anti.get("hourly", {}).get("max_comments", 5))
+            if not ok:
+                debug_info.append({"action": "comment", "title": article["title"], "status": f"rate_limit:{msg}"})
+                continue
+
+            text = pre_generated.get(article["article_id"], "")
+            if self.dry_run:
+                logger.info(f"[DRY-RUN] 模拟评论: {article['title'][:40]}...")
+                comments_done += 1
+                debug_info.append({"action": "comment", "title": article["title"], "status": "dry-run"})
+            else:
+                logger.info(f"⎿ 发表评论: {article['title'][:40]}...")
+                success = self.article_commenter.post_with_scraper(article["article_id"], text)
+                if success:
+                    comments_done += 1
+                    record = {
+                        "article_id": article["article_id"], "title": article.get("title", ""),
+                        "content": text[:200], "keyword": article.get("keyword", ""),
+                        "timestamp": datetime.now().isoformat(), "type": "评论",
+                    }
+                    self.article_commenter.history.append(record)
+                    save_history(COMMENTED_FILE, self.article_commenter.history)
+                    debug_info.append({"action": "comment", "title": article["title"], "status": "success"})
+                else:
+                    debug_info.append({"action": "comment", "title": article["title"], "status": "post_failed"})
+
+            d = delays.get("between_comments", {"min": 60, "max": 180})
+            wait_random(d["min"], d["max"], "评论间隔")
+
+        # 回答发表
+        for qa in target_qa:
             if answers_done >= max_answers:
                 break
-            ok, msg = self.qa_answerer.process(qa, qa.get("keyword", ""))
-            if ok:
+            is_dup, reason = self.qa_answerer._is_processed(qa["article_id"])
+            if is_dup:
+                debug_info.append({"action": "answer", "title": qa["title"], "status": f"skip:{reason}"})
+                continue
+
+            ok, msg = check_rate_limits(self.qa_answerer.history, "回答",
+                                         anti.get("daily", {}).get("max_answers", 5),
+                                         anti.get("hourly", {}).get("max_answers", 3))
+            if not ok:
+                debug_info.append({"action": "answer", "title": qa["title"], "status": f"rate_limit:{msg}"})
+                continue
+
+            text = pre_generated.get(qa["article_id"], "")
+            if self.dry_run:
+                logger.info(f"[DRY-RUN] 模拟回答: {qa['title'][:40]}...")
                 answers_done += 1
-                debug_info.append({"action": "answer", "title": qa["title"], "status": msg})
-                d = delays.get("between_answers", {"min": 90, "max": 240})
-                wait_random(d["min"], d["max"], "回答间隔")
+                debug_info.append({"action": "answer", "title": qa["title"], "status": "dry-run"})
             else:
-                debug_info.append({"action": "answer", "title": qa["title"], "status": f"fail:{msg}"})
+                logger.info(f"⎿ 发表回答: {qa['title'][:40]}...")
+                success = self.qa_answerer.post_with_scraper(qa["article_id"], text)
+                if success:
+                    answers_done += 1
+                    record = {
+                        "article_id": qa["article_id"], "title": qa.get("title", ""),
+                        "content": text[:200], "keyword": qa.get("keyword", ""),
+                        "timestamp": datetime.now().isoformat(), "type": "回答",
+                    }
+                    self.qa_answerer.history.append(record)
+                    save_history(ANSWERED_FILE, self.qa_answerer.history)
+                    debug_info.append({"action": "answer", "title": qa["title"], "status": "success"})
+                else:
+                    debug_info.append({"action": "answer", "title": qa["title"], "status": "post_failed"})
+
+            d = delays.get("between_answers", {"min": 90, "max": 240})
+            wait_random(d["min"], d["max"], "回答间隔")
 
         # 汇总
         logger.info("\n" + "=" * 60)
         logger.info("✅ 执行完成")
-        logger.info(f"  搜索关键词: {len(keywords)} 个")
+        logger.info(f"  搜索关键词: {len(keywords)} 个 (并行)")
         logger.info(f"  找到内容:   {len(all_articles)} 条")
         logger.info(f"  评论成功:   {comments_done} 条")
         logger.info(f"  回答成功:   {answers_done} 条")
