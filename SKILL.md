@@ -1,3 +1,17 @@
+---
+name: woshipm-publisher
+description: |
+  人人都是产品经理(woshipm)全栈运营：评论区获客(AI评论+问答回答) + 热点获客发文
+  基于 WordPress API 浏览器自动化和百度千帆 API 驱动 AI 内容生成
+metadata:
+  openclaw:
+    emoji: "📢"
+    requires:
+      env: ["BROWSERWING_EXECUTOR_URL"]
+    category: "acquisition"
+    tags: ["woshipm", "acquisition", "publish", "hotspot", "browserwing", "ai"]
+---
+
 # woshipm-publisher
 
 人人都是产品经理(woshipm.com) 全栈运营技能。
@@ -11,11 +25,19 @@
                                │
           ┌────────────────────┼────────────────────┐
           ▼                    ▼                    ▼
-   ┌──────────────┐   ┌──────────────┐   ┌──────────────┐
-   │ 评论区获客    │   │  独立搜索     │   │  文章发布     │
-   │ v1.0 ✅      │   │  v1.0 ✅     │   │  🚧 待开发    │
-   └──────────────┘   └──────────────┘   └──────────────┘
+   ┌──────────────┐   ┌──────────────┐   ┌──────────────────┐
+   │ 评论区获客    │   │  独立搜索     │   │  热点获客发文     │
+   │ v1.0 ✅      │   │  v1.0 ✅     │   │  v1.0 ✅          │
+   └──────────────┘   └──────────────┘   └──────────────────┘
 ```
+
+## 功能矩阵
+
+| 功能 | 说明 | 关联脚本 |
+|------|------|----------|
+| 🎯 评论区获客 | 搜索 → 四维评分 → LLM评论 → WordPress API 发表 | `woshipm_acquisition.py` |
+| 🔍 独立搜索 | 关键词搜索 woshipm 文章 | `woshipm_search.py` |
+| 🔥 热点获客发文 | TrendRadar热点 → 产品分析 → AI挑选 → LLM文章 → Pexels封面 → BW发布 | `woshipm-hotspot-publish.py` |
 
 ---
 
@@ -144,22 +166,102 @@
 
 ---
 
-## 模块二：文章发布 🚧
+## 模块二：热点获客发文 v1.0 ✅
 
-(待开发，占位)
+TrendRadar(新智元RSS→V2EX降级) → 产品分析 → AI挑选 → LLM生成获客文章 → Pexels封面 → BrowserWing发布
+
+### 流程设计
+
+```
+           输入：产品 URL
+                │
+     ┌──────────▼──────────┐
+     │  抓取产品页面内容     │
+     │  浅层抓取→深度抓取    │
+     └──────────┬──────────┘
+                │
+     ┌──────────▼──────────┐
+     │  LLM 结构化分析      │
+     │  (产品名/卖点/痛点)  │
+     └──────────┬──────────┘
+                │
+     ┌──────────▼──────────┐
+     │  新智元 RSS 热点获取 │
+     │  (降级 V2EX)        │
+     └──────────┬──────────┘
+                │
+     ┌──────────▼──────────┐
+     │  AI 挑选最佳热点     │
+     │  (评分+选择理由)     │
+     └──────────┬──────────┘
+                │
+     ┌──────────▼──────────┐
+     │  LLM 生成获客文章    │
+     │  热点切入→软植入产品 │
+     │  纯文本(无Markdown)  │
+     └──────────┬──────────┘
+                │
+     ┌──────────▼──────────┐
+     │  Pexels 封面下载     │
+     │  → data/covers/     │
+     └──────────┬──────────┘
+                │
+     ┌──────────▼──────────┐
+     │  BrowserWing 发布    │
+     │  或保存为本地草稿    │
+     └─────────────────────┘
+```
+
+### 使用
+
+```bash
+# 测试模式（不发布）
+python3 scripts/woshipm-hotspot-publish.py --product-url "https://example.com" --dry-run
+
+# 正式发布（需先录制 BW 脚本）
+python3 scripts/woshipm-hotspot-publish.py --product-url "https://example.com"
+
+# 指定生成数量
+python3 scripts/woshipm-hotspot-publish.py --product-url "https://example.com" --max 2
+```
+
+### 注意事项
+
+BrowserWing 发布前需先在 BrowserWing 录制 woshipm 写文章脚本，然后设置环境变量：
+```bash
+export WOSHIPM_PUBLISH_SCRIPT_ID="你的BW脚本ID"
+```
+
+---
+
+## LLM 配置
+
+### 模型配置
+
+使用百度千帆 Coding Plan API（OpenAI 兼容接口），配置在 `config/llm.json`：
+
+```json
+{
+  "provider": "baiduqianfancodingplan",
+  "api_key": "bce-v3/xxx",
+  "model": "qianfan-code-latest"
+}
+```
+
+也支持 `deepseek`、`sensenova` 等 provider。模板文件 `config/llm.template.json` 复制为 `llm.json` 后填入实际 API Key。
 
 ---
 
 ## 安装依赖
 
 ```bash
-pip install cloudscraper
+pip install cloudscraper requests beautifulsoup4
 ```
 
 ## 配置
 
 ```bash
-# .env 文件
+# .env 文件（仅保留 Cookie）
 WOSHIPM_COOKIE="你的登录Cookie"
 ```
 
@@ -168,33 +270,49 @@ Cookie 获取方式：登录 woshipm.com → F12 → Application → Cookies →
 ## CLI 命令
 
 ```bash
-# 全自动获客（测试模式）
+# ── 评论区获客 ──
 python3 scripts/woshipm_acquisition.py auto \
   --product-url "https://your-product.com" --dry-run
 
-# 全自动获客（正式）
 python3 scripts/woshipm_acquisition.py auto \
   --product-url "https://your-product.com" \
   --max-comments 10 --max-answers 3
 
-# 独立搜索
+# ── 独立搜索 ──
 python3 scripts/woshipm_search.py --keyword "产品经理" --max-pages 3
+
+# ── 热点获客发文 ──
+python3 scripts/woshipm-hotspot-publish.py --product-url "https://your-product.com" --dry-run
+python3 scripts/woshipm-hotspot-publish.py --product-url "https://your-product.com"
 ```
 
 ## 文件结构
 
 ```
 woshipm-publisher/
-├── SKILL.md                         # 技术设计文档
-├── README.md                        # 用户使用指南
-├── _meta.json                       # 技能元数据
-├── .env                             # Cookie + LLM 配置
-├── woshipm_acquisition_config.json  # 获客策略配置
-├── scripts/
-│   ├── woshipm_acquisition.py       # 获客主脚本 (1100+ 行)
-│   └── woshipm_search.py            # 独立搜索工具
-├── data/
-│   ├── commented-history.json       # 评论去重
-│   └── answered-history.json        # 回答去重
-└── templates/                       # 发布模板 (待)
+├── SKILL.md                         ← 本文
+├── README.md                        ← 用户使用指南
+├── _meta.json                       ← 技能元数据
+├── .env                             ← Cookie 配置
+├── woshipm_acquisition_config.json  ← 获客策略配置
+│
+├── config/                          ← LLM 配置
+│   ├── llm.json                     ← provider/api_key/model
+│   └── llm.template.json            ← 模板
+│
+├── scripts/                         ← Python 脚本
+│   ├── woshipm_acquisition.py       ← 评论区获客
+│   ├── woshipm_search.py            ← 独立搜索
+│   ├── woshipm-hotspot-publish.py   ← ★ 热点获客发文
+│   └── zhihu_llm.py                 ← LLM 调用封装
+│
+├── templates/                       ← LLM 提示词模板
+│   ├── product-analysis-prompt.md   ← ★ 产品分析模板
+│   └── hotspot-acquisition-prompt.md ← ★ 获客文章模板
+│
+├── output/                          ← 生成文章预览
+└── data/                            ← 运行时数据
+    ├── covers/                      ← Pexels 封面图本地缓存
+    ├── commented-history.json
+    └── answered-history.json
 ```

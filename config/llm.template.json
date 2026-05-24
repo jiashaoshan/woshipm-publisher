@@ -1,0 +1,7 @@
+{
+  "$schema": "LLM 配置",
+  "$description": "复制本文件为 llm.json 并填入实际 API Key",
+  "provider": "baiduqianfancodingplan",
+  "api_key": "bce-v3/your-api-key-here",
+  "model": "qianfan-code-latest"
+}

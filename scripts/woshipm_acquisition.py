@@ -42,27 +42,8 @@ except ImportError:
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 SKILL_ROOT = os.path.dirname(SCRIPT_DIR)
 
-# 尝试导入共享 LLM 模块
-_LLM_MODULE = None
-_LLM_SEARCH_PATHS = [
-    os.path.join(os.path.dirname(SKILL_ROOT), "juejin-publisher", "scripts", "zhihu_llm.py"),
-    os.path.join(SCRIPT_DIR, "zhihu_llm.py"),
-]
-_LLM_MODULE_PATH = None
-for p in _LLM_SEARCH_PATHS:
-    if os.path.exists(p):
-        _LLM_MODULE_PATH = p
-        break
-if _LLM_MODULE_PATH:
-    import importlib.util
-    spec = importlib.util.spec_from_file_location("zhihu_llm", _LLM_MODULE_PATH)
-    _LLM_MODULE = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(_LLM_MODULE)
-    call_llm = _LLM_MODULE.call_llm
-    call_llm_json = _LLM_MODULE.call_llm_json
-else:
-    call_llm = None
-    call_llm_json = None
+sys.path.insert(0, SCRIPT_DIR)
+from zhihu_llm import call_llm, call_llm_json
 
 # ─── 路径配置 ─────────────────────────────────────────────
 CONFIG_FILE = os.path.join(SKILL_ROOT, ".env")
