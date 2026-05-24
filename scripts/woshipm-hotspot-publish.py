@@ -1,13 +1,12 @@
 """
-Woshipm 热点获客发文 (v1.0.0)
+Woshipm 热点获客发文 (v1.1.0)
 
-流程: TrendRadar(新智元RSS→V2EX降级) → 产品分析 → AI挑选 → LLM生成获客文章 → Pexels封面 → BrowserWing发布
+流程: TrendRadar → 产品分析 → AI挑选 → LLM生成获客文章 → Pexels封面 → WordPress AJAX API 发布
 
 使用:
   python3 scripts/woshipm-hotspot-publish.py --product-url "https://example.com"
   python3 scripts/woshipm-hotspot-publish.py --product-url "https://example.com" --dry-run
   python3 scripts/woshipm-hotspot-publish.py --product-url "https://example.com" --max 2
-  python3 scripts/woshipm-hotspot-publish.py --product-url "https://example.com" --auto
 """
 import json, logging, os, sys, re, random, time
 from datetime import datetime
@@ -25,9 +24,7 @@ from zhihu_llm import call_llm, call_llm_json, fetch_url_content
 
 logger = logging.getLogger("woshipm-hotspot-publish")
 
-BROWSERWING_URL = os.environ.get("BROWSERWING_EXECUTOR_URL", "http://127.0.0.1:8080")
-# 用户需要在 BrowserWing 中录制 woshipm 写文章脚本后，修改此 ID
-PUBLISH_SCRIPT_ID = os.environ.get("WOSHIPM_PUBLISH_SCRIPT_ID", "")
+WOSHIPM_COOKIE = os.environ.get("WOSHIPM_COOKIE", "")
 DEFAULT_MCP_URL = os.environ.get("TRENDRADAR_URL", "http://100.111.235.91:3333/mcp")
 MAX_TITLE_LEN = 30
 MIN_BODY_LEN = 1500
@@ -459,39 +456,110 @@ def generate_cover(article, product_info):
 
 
 # ====================================================================
-# BrowserWing 发布
+# WordPress AJAX API 发布
 # ====================================================================
 
-def publish_via_browserwing(title, body, cover_path=""):
-    """通过 BrowserWing 发布文章到 woshipm"""
-    import requests as _req
-    script_id = PUBLISH_SCRIPT_ID
-    if not script_id:
-        logger.warning("  ⏭️ 未配置 WOSHIPM_PUBLISH_SCRIPT_ID，跳过 BrowserWing 发布")
-        logger.warning("  请先在 BrowserWing 录制 woshipm 写文章脚本，然后设置环境变量")
+def publish_via_api(title, body, copyright_agreed=True):
+    """通过 WordPress AJAX API 提交文章审核（action=add_pending）"""
+    cookie = WOSHIPM_COOKIE
+    if not cookie:
+        logger.error("  ❌ 未配置 WOSHIPM_COOKIE，无法发布")
         return False
 
-    logger.info(f"  📤 发布文章: {title[:30]}...")
+    logger.info(f"  📤 提交审核: {title[:30]}... ({len(body)}字)")
+
+    data = {
+        "action": "add_pending",
+        "post_title": title[:MAX_TITLE_LEN] if len(title) > MAX_TITLE_LEN else title,
+        "post_content": body,
+    }
+    if copyright_agreed:
+        data["copyright"] = "1"
+        data["copyright_other"] = "1"
+        data["copyright_pm"] = "1"
+
     try:
-        url = f"{BROWSERWING_URL}/api/v1/scripts/{script_id}/play"
-        payload = {
-            "params": {
-                "封面": cover_path,
-                "标题": title[:MAX_TITLE_LEN],
-                "正文": body[:4000],
-            }
-        }
-        resp = _req.post(url, json=payload, timeout=120)
-        resp.raise_for_status()
-        result = resp.json()
-        status = result.get("status", "")
-        if status == "success" or status == "completed":
-            logger.info(f"  ✅ 发布成功")
+        import requests
+        resp = requests.post(
+            "https://www.woshipm.com/wp-admin/admin-ajax.php",
+            data=data,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+                "Accept": "application/json, text/javascript, */*; q=0.01",
+                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+                "X-Requested-With": "XMLHttpRequest",
+                "Cookie": cookie,
+            },
+            timeout=30,
+        )
+        try:
+            result = resp.json()
+        except Exception:
+            logger.error(f"  响应非 JSON: {resp.text[:200]}")
+            return False
+
+        success = result.get("success")
+        if success == 1 or success is True:
+            logger.info(f"  ✅ 文章已提交审核: {title[:30]}")
             return True
-        logger.warning(f"  ⚠️ 状态: {status}")
-        return True
+        else:
+            msg = result.get("message", result.get("msg", "未知错误"))
+            logger.error(f"  ❌ 提交失败: {msg}")
+            return False
+
     except Exception as e:
-        logger.error(f"  ❌ 发布失败: {e}")
+        logger.error(f"  ❌ 发布请求异常: {e}")
+        return False
+
+
+def save_draft_via_api(title, body):
+    """通过 WordPress AJAX API 保存草稿（action=add_draft）"""
+    cookie = WOSHIPM_COOKIE
+    if not cookie:
+        logger.error("  ❌ 未配置 WOSHIPM_COOKIE，无法保存草稿")
+        return False
+
+    logger.info(f"  📄 保存草稿: {title[:30]}...")
+
+    data = {
+        "action": "add_draft",
+        "post_title": title[:MAX_TITLE_LEN] if len(title) > MAX_TITLE_LEN else title,
+        "post_content": body,
+    }
+
+    try:
+        import requests
+        resp = requests.post(
+            "https://www.woshipm.com/wp-admin/admin-ajax.php",
+            data=data,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+                "Accept": "application/json, text/javascript, */*; q=0.01",
+                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+                "X-Requested-With": "XMLHttpRequest",
+                "Cookie": cookie,
+            },
+            timeout=30,
+        )
+        try:
+            result = resp.json()
+        except Exception:
+            logger.error(f"  响应非 JSON: {resp.text[:200]}")
+            return False
+
+        post_id = result.get("post_id")
+        url = result.get("url", "")
+        if post_id:
+            logger.info(f"  ✅ 草稿已保存 (ID: {post_id})")
+            if url:
+                logger.info(f"  🔗 预览: {url}")
+            return True
+        else:
+            logger.error(f"  ❌ 保存草稿失败: {str(result)[:200]}")
+            return False
+
+    except Exception as e:
+        logger.error(f"  ❌ 保存草稿异常: {e}")
         return False
 
 
@@ -604,11 +672,10 @@ def run(product_url, dry_run=False, max_count=1, auto_confirm=False):
             })
             continue
 
-        # 发布
-        pub_ok = publish_via_browserwing(
-            title=article["title"][:MAX_TITLE_LEN],
+        # 发布（通过 WordPress AJAX API 提交审核）
+        pub_ok = publish_via_api(
+            title=article["title"],
             body=article["body"],
-            cover_path=cover_path,
         )
 
         if pub_ok:

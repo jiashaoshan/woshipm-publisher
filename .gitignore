@@ -3,6 +3,7 @@ __pycache__/
 *.log
 output/
 data/*.json
+data/covers/
 !.gitkeep
 .env
 woshipm.env
