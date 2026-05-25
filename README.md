@@ -2,7 +2,7 @@
 
 人人都是产品经理(woshipm.com) 全栈运营技能：AI 驱动的评论区获客 + 热点获客发文。
 
-[![version](https://img.shields.io/badge/version-1.1.0-blue)](https://github.com/jiashaoshan/woshipm-publisher)
+[![version](https://img.shields.io/badge/version-1.2.0-blue)](https://github.com/jiashaoshan/woshipm-publisher)
 [![python](https://img.shields.io/badge/python-3.8+-green)](https://www.python.org/)
 
 ## 功能
@@ -11,7 +11,7 @@
 
 输入一个产品链接，自动完成：
 
-1. **理解产品** — 抓取产品网站 meta 信息，知道产品是做什么的
+1. **理解产品** — 抓取产品网站内容，知道产品是做什么的
 2. **生成关键词** — LLM 产出 8 个搜索关键词
 3. **搜索文章** — 在 woshipm 搜索文章(tab=0) 和问答(tab=2)
 4. **智能筛选** — 四维评分：曝光机会 + 内容质量 + 作者活跃 + 互动健康
@@ -20,14 +20,25 @@
 
 ### 热点获客发文 ✅
 
-TrendRadar 获取热点 → LLM 产品分析 → AI 挑选最佳热点 → LLM 生成获客文章 → Pexels 封面 → 发布
+RSS热点(AI/科技类) → LLM 产品分析 → AI 挑选最佳热点 → LLM 生成行业分析文章 → Pexels 封面 → WordPress 发布
 
 1. **产品分析** — 抓取产品链接，LLM 结构化分析（产品名/卖点/痛点/功能）
-2. **热点获取** — 从 TrendRadar MCP 获取多平台热点
-3. **AI 挑选** — 自动匹配最适合与产品结合的热点
-4. **文章生成** — LLM 生成 1500-3000 字获客文章（产品软植入，纯文本无 Markdown）
+2. **热点获取** — 从 AI/产品类 RSS 获取（新智元、量子位、Hacker News 优先，降级 36氪/知乎/V2EX/掘金）
+3. **AI 挑选** — 以产品经理选题策划视角，匹配最适合的热点
+4. **文章生成** — LLM 生成 1000-2000 字行业分析文章，产品作为案例自然出现
 5. **封面图** — Pexels 搜索并下载到本地 `data/covers/`
 6. **发布** — 通过 WordPress AJAX API 提交审核
+
+### v1.2 更新内容
+
+| 改动 | 之前 | 之后 |
+|------|------|------|
+| 热点源 | 全平台热榜（含娱乐/体育/社会） | AI/科技类 RSS（新智元、量子位、Hacker News） |
+| 文章定位 | 热点切入→安利产品 | 产品经理视角的行业分析，产品作为案例 |
+| AI选热点 | 营销策略专家 | PM 选题策划 |
+| 文章角度 | 技术实现/工具评测 | 产品设计/商业模式/行业趋势/选型思路 |
+| 产品出现 | "原来还有这种好东西" | 作为行业案例/解决思路自然提及 |
+| 标题风格 | 可含产品名 | 像正常行业分析文章 |
 
 ## 快速开始
 
