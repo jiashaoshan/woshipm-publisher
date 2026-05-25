@@ -142,12 +142,48 @@ def analyze_product_page(product_url):
 # ====================================================================
 
 def fetch_rss_items():
-    """从 TrendRadar MCP 获取全平台新闻热点"""
-    logger.info("📡 获取热点（新闻平台优先）...")
+    """从高质量 RSS 源获取 AI/科技热点（新智元、量子位、Hacker News）"""
+    logger.info("📡 获取 AI/科技热点（RSS 优先）...")
+    all_items = []
+
+    # RSS 源：AI/科技类为主
+    ai_feeds = ["xinzhiyuan", "liangziwei", "hacker-news"]
     try:
-        result = mcp_call_tool("get_latest_news", {"limit": 30, "include_url": True}, DEFAULT_MCP_URL)
+        result = mcp_call_tool("get_latest_rss", {"feeds": ai_feeds, "days": 1, "limit": 60, "include_summary": True}, DEFAULT_MCP_URL)
         content = result.get("result", {}).get("content", []) or result.get("content", [])
-        items = []
+        for item in content:
+            text = item.get("text", "") if isinstance(item, dict) else str(item)
+            if not text:
+                continue
+            try:
+                rss_data = json.loads(text) if isinstance(text, str) else text
+                for article in (rss_data.get("data", []) if isinstance(rss_data, dict) else []):
+                    title = article.get("title", "").strip()
+                    url = article.get("url", "").strip()
+                    summary = article.get("summary", article.get("content", ""))[:300]
+                    feed_id = article.get("feed_id", article.get("feed_name", "科技"))
+                    if not title:
+                        continue
+                    all_items.append({
+                        "title": title,
+                        "url": url,
+                        "source": feed_id,
+                        "content": summary or title,
+                    })
+            except (json.JSONDecodeError, TypeError):
+                pass
+    except Exception as e:
+        logger.warning(f"  RSS 获取失败: {e}")
+
+    if all_items:
+        logger.info(f"  RSS 热点: {len(all_items)} 条")
+        return all_items[:20]
+
+    # 降级：从 PM 相关平台热榜获取
+    logger.info("  RSS 无数据，降级平台热榜...")
+    try:
+        result = mcp_call_tool("get_latest_news", {"platforms": ["36kr", "zhihu", "v2ex", "juejin"], "limit": 20, "include_url": True}, DEFAULT_MCP_URL)
+        content = result.get("result", {}).get("content", []) or result.get("content", [])
         seen_titles = set()
         for item in content:
             text = item.get("text", "") if isinstance(item, dict) else str(item)
@@ -158,31 +194,30 @@ def fetch_rss_items():
                 for article in (news_data.get("data", []) if isinstance(news_data, dict) else []):
                     title = article.get("title", "").strip()
                     url = article.get("url", "").strip()
-                    platform = article.get("platform", article.get("feed_id", "")).strip()
+                    platform = article.get("platform", "热点").strip()
                     if not title or title in seen_titles:
                         continue
                     seen_titles.add(title)
-                    items.append({
+                    all_items.append({
                         "title": title,
                         "url": url,
-                        "source": platform or "热点",
+                        "source": platform,
                         "content": title,
                     })
             except (json.JSONDecodeError, TypeError):
                 pass
-
-        logger.info(f"  热点: {len(items)} 条")
-        return items[:15]
     except Exception as e:
-        logger.warning(f"  热点获取失败: {e}")
-        return []
+        logger.warning(f"  平台热榜获取失败: {e}")
+
+    logger.info(f"  平台热点: {len(all_items)} 条")
+    return all_items[:20]
 
 
 def fetch_v2ex_topics():
-    """降级方案：从 V2EX / 36kr 等平台获取热点"""
-    logger.info("📡 降级 V2EX...")
+    """最终降级方案"""
+    logger.info("📡 最终降级...")
     try:
-        result = mcp_call_tool("get_latest_news", {"platforms": ["v2ex", "36kr", "zhihu"], "limit": 20, "include_url": True}, DEFAULT_MCP_URL)
+        result = mcp_call_tool("get_latest_news", {"platforms": ["v2ex", "36kr"], "limit": 15, "include_url": True}, DEFAULT_MCP_URL)
         content = result.get("result", {}).get("content", []) or result.get("content", [])
         items = []
         seen_titles = set()
@@ -194,24 +229,16 @@ def fetch_v2ex_topics():
                 news_data = json.loads(text) if isinstance(text, str) else text
                 for article in (news_data.get("data", []) if isinstance(news_data, dict) else []):
                     title = article.get("title", "").strip()
-                    url = article.get("url", "").strip()
-                    platform = article.get("platform", article.get("feed_id", "")).strip()
                     if not title or title in seen_titles:
                         continue
                     seen_titles.add(title)
-                    items.append({
-                        "title": title,
-                        "url": url,
-                        "source": platform or "热点",
-                        "content": title,
-                    })
-            except (json.JSONDecodeError, TypeError):
+                    items.append({"title": title, "url": article.get("url",""), "source": article.get("platform","热点"), "content": title})
+            except:
                 pass
-
         logger.info(f"  降级热点: {len(items)} 条")
         return items[:15]
     except Exception as e:
-        logger.warning(f"  降级获取失败: {e}")
+        logger.warning(f"  降级失败: {e}")
         return []
 
 
