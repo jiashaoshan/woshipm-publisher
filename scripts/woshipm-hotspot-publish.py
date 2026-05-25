@@ -243,13 +243,13 @@ def select_and_rewrite(candidates, product_info, product_url, max_count=1):
         f"核心功能: {json.dumps(product_info.get('core_features', []), ensure_ascii=False)}\n"
         f"解决痛点: {json.dumps(product_info.get('pain_points_solved', []), ensure_ascii=False)}\n\n"
         f"候选热点:\n" + "\n".join(candidate_lines) + "\n\n"
-        f"请选择最适合与该产品结合的热点，返回JSON: {{\"index\": 序号, \"reason\": \"选择理由\"}}"
+        f"请选择最适合产品经理/行业分析角度的热点，返回JSON: {{\"index\": 序号, \"reason\": \"选择理由\"}}"
     )
 
     logger.info("🤖 AI 挑选最佳热点...")
     try:
         selection = call_llm_json(
-            system_prompt="你是一个营销策略专家，擅长将产品与热点话题自然结合。选择1个最合适的热点。",
+            system_prompt="你是一个人人都是产品经理平台的选题策划，擅长挑选适合产品经理阅读的行业热点。",
             user_prompt=selection_prompt,
             temperature=0.3,
         )
@@ -312,7 +312,7 @@ def select_and_rewrite(candidates, product_info, product_url, max_count=1):
     try:
 
         raw = call_llm(
-            system_prompt="你是一位人人都是产品经理的资深作者。输出必须包含 ===TITLE===、===BRIEF===、===BODY===、===END=== 标记。正文为纯文本，不要 Markdown 语法。",
+            system_prompt="你是一位人人都是产品经理社区的资深作者，擅长从产品经理视角分析行业动态和趋势。输出必须包含 ===TITLE===、===BRIEF===、===BODY===、===END=== 标记。正文为纯文本，不要 Markdown 语法。",
             user_prompt=article_prompt,
             temperature=0.7,
             max_tokens=4096,
